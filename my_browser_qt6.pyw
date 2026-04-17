@@ -116,6 +116,11 @@ def is_google_auth_host(hostname):
     host = (hostname or "").lower()
     return host in {"accounts.google.com", "signin.google.com"}
 
+
+def is_google_search_host(hostname):
+    host = (hostname or "").lower()
+    return host in {"google.com", "www.google.com"}
+
 CHROMIUM_FLAGS = [
     "--autoplay-policy=no-user-gesture-required",
     "--disable-background-media-suspend",
@@ -147,9 +152,21 @@ MEDIA_COMPATIBILITY_HOST_FRAGMENTS = (
     "anicrush",
     "anicrush.to",
     "anicrush.tv",
+    "hianime",
+    "aniwatch",
+    "anix",
+    "aniwave",
+    "animepahe",
+    "zoro",
+    "gogoanime",
     "southcloud",
     "vidstream",
     "rabbitstream",
+    "megacloud",
+    "filemoon",
+    "streamtape",
+    "streamsb",
+    "mp4upload",
 )
 POPUP_COMPATIBILITY_HOST_FRAGMENTS = MEDIA_COMPATIBILITY_HOST_FRAGMENTS + (
     "megacloud",
@@ -1435,7 +1452,7 @@ class SecurityInterceptor(QWebEngineUrlRequestInterceptor):
                     or any(hint in target_text for hint in (".m3u8", ".mpd", ".m4s", ".mp4", ".webm", "playlist", "manifest"))
                 )
                 google_auth_request = is_google_auth_host(host) or is_google_auth_host(first_party_host)
-                if host.endswith("google.com") and not google_auth_request:
+                if is_google_search_host(host) and not google_auth_request:
                     info.setHttpHeader(b"X-Requested-With", b"")
                     info.setHttpHeader(
                         b"User-Agent",
@@ -3773,14 +3790,16 @@ class DetachedBrowserWindow(QMainWindow):
         if not url:
             return
         if self.parent_window and hasattr(self.parent_window, "open_target_in_browser"):
-            if not url.startswith("http") and not url.lower().startswith("aurora:"):
-                if " " in url or "." not in url:
-                    url = self.parent_window.search_url_for_query(url) if hasattr(self.parent_window, "search_url_for_query") else ("https://www.google.com/search?q=" + quote_plus(url))
-                else:
+            if hasattr(self.parent_window, "normalize_typed_url_or_query"):
+                url = self.parent_window.normalize_typed_url_or_query(url)
+            elif not url.lower().startswith(("http", "ftp", "aurora:")):
+                if " " not in url and "." in url:
                     url = "https://" + url
+                else:
+                    url = self.parent_window.search_url_for_query(url) if hasattr(self.parent_window, "search_url_for_query") else ("https://www.google.com/search?q=" + quote_plus(url))
             self.parent_window.open_target_in_browser(self.browser, url)
             return
-        if not url.startswith("http"):
+        if not url.lower().startswith(("http", "ftp")):
             if " " in url or "." not in url:
                 url = "https://www.google.com/search?q=" + quote_plus(url)
             else:
@@ -4129,11 +4148,11 @@ class IncognitoWindow(QMainWindow):
         url = self.url_bar.text().strip()
         if not url:
             return
-        if not url.startswith("http"):
-            if " " in url or "." not in url:
-                url = "https://www.google.com/search?udm=14&q=" + quote_plus(url)
-            else:
+        if not url.lower().startswith(("http", "ftp")):
+            if " " not in url and "." in url:
                 url = "https://" + url
+            else:
+                url = "https://www.google.com/search?udm=14&q=" + quote_plus(url)
         self.current_browser().setUrl(QUrl(url))
 
     def current_browser(self):
@@ -5697,7 +5716,38 @@ class MyBrowser(QMainWindow):
         index = self.tab_widget.indexOf(tab)
         if index >= 0:
             self.apply_tab_visual_state(tab, tab.title())
+            self.reposition_tab_for_pin_state(tab)
         self.save_pinned_tabs()
+
+    def pinned_tab_count(self):
+        count = 0
+        for i in range(self.tab_widget.count()):
+            tab = self.tab_widget.widget(i)
+            if tab is not None and tab.property("pinned"):
+                count += 1
+        return count
+
+    def reposition_tab_for_pin_state(self, tab):
+        if tab is None:
+            return
+        current_index = self.tab_widget.indexOf(tab)
+        if current_index < 0:
+            return
+        pinned = bool(tab.property("pinned"))
+        if pinned:
+            target_index = 0
+            for i in range(self.tab_widget.count()):
+                if i == current_index:
+                    continue
+                other_tab = self.tab_widget.widget(i)
+                if other_tab is not None and other_tab.property("pinned"):
+                    target_index = i + 1
+            if target_index != current_index:
+                self.tab_widget.tabBar().moveTab(current_index, target_index)
+        else:
+            first_unpinned = self.pinned_tab_count()
+            if current_index < first_unpinned:
+                self.tab_widget.tabBar().moveTab(current_index, first_unpinned - 1)
 
     def duplicate_tab(self, tab=None):
         source_tab = tab or self.current_browser()
@@ -8225,6 +8275,8 @@ class MyBrowser(QMainWindow):
         target_str = target.toString() if isinstance(target, QUrl) else str(target).strip()
         if not target_str:
             target_str = self.homepage
+        if not isinstance(target, QUrl) and not target_str.lower().startswith(("http", "ftp", "aurora:", "about:")):
+            target_str = self.normalize_typed_url_or_query(target_str)
         lowered = target_str.lower()
         if lowered in ("aurora://home", "about:aurora", "about:newtab", "aurora:home") or "aurora.home" in lowered:
             browser.setHtml(self.get_cached_homepage_html(), QUrl("https://aurora.home/"))
@@ -8477,7 +8529,7 @@ class MyBrowser(QMainWindow):
         first_party_host = (record.get("first_party_host") or "").lower()
         if not host_matches_fragment(first_party_host, MEDIA_COMPATIBILITY_HOST_FRAGMENTS):
             return
-        if ".m3u8" not in url_value and ".mp4" not in url_value:
+        if not any(marker in url_value for marker in (".m3u8", ".mp4", ".mpd", ".webm")):
             return
         token = f"{first_party_host}|{record.get('url', '')}"
         if token in self.native_media_autoplay_tokens:
@@ -9034,7 +9086,7 @@ class MyBrowser(QMainWindow):
                 host = (urlparse(tab.url().toString()).hostname or "").lower()
             except Exception:
                 host = ""
-            if host.endswith("google.com") and not is_google_auth_host(host):
+            if is_google_search_host(host) and not is_google_auth_host(host):
                 tab.page().runJavaScript(
                     "try{Object.defineProperty(navigator,'webdriver',{get:()=>undefined});}catch(e){}"
                 )
@@ -9280,8 +9332,12 @@ class MyBrowser(QMainWindow):
         new_tab.loadFinished.connect(lambda ok, tab=new_tab: self.on_tab_load_finished(ok, tab))
         self.open_target_in_browser(new_tab, url)
         new_tab.urlChanged.connect(self.on_url_changed)
-        current_index = self.tab_widget.currentIndex()
-        insert_index = self.tab_widget.count() if current_index < 0 else current_index + 1
+        if pinned:
+            insert_index = self.pinned_tab_count()
+        else:
+            current_index = self.tab_widget.currentIndex()
+            insert_index = self.tab_widget.count() if current_index < 0 else current_index + 1
+            insert_index = max(insert_index, self.pinned_tab_count())
         index = self.tab_widget.insertTab(insert_index, new_tab, label)
         self.tab_widget.setCurrentIndex(index)
         if pinned:
@@ -9488,23 +9544,30 @@ class MyBrowser(QMainWindow):
         search_base = self.search_engines.get(engine, self.search_engines["Google"])
         return search_base + quote_plus(query)
 
+    def normalize_typed_url_or_query(self, raw_value):
+        url = (raw_value or "").strip()
+        if not url:
+            return ""
+        lowered = url.lower()
+        if lowered in ("aurora://home", "about:aurora", "about:newtab", "aurora:home", "home"):
+            return "aurora://home"
+        if lowered.startswith("aurora://settings") or lowered.startswith("aurora:settings"):
+            return url
+        if not lowered.startswith("http") and not lowered.startswith("ftp"):
+            if " " not in url and "." in url:
+                url = "https://" + url
+            else:
+                url = self.search_url_for_query(url)
+        return url
+
     def on_search_engine_changed(self, _engine_name):
         self.save_browser_settings()
         self.refresh_internal_pages()
 
     def load_url(self):
-        url = self.url_bar.text().strip()
-        if url.lower() in ("aurora://home", "about:aurora", "about:newtab", "aurora:home", "home"):
-            self.open_target_in_browser(self.current_browser(), "aurora://home")
+        url = self.normalize_typed_url_or_query(self.url_bar.text())
+        if not url:
             return
-        if url.lower().startswith("aurora://settings") or url.lower().startswith("aurora:settings"):
-            self.open_target_in_browser(self.current_browser(), url)
-            return
-        if not url.startswith("http") and not url.startswith("ftp"):
-            if " " not in url and "." in url:
-                url = "https://" + url
-            else:
-                url = self.search_url_for_query(url)
         self.open_target_in_browser(self.current_browser(), url)
 
     def current_browser(self):
